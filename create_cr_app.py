@@ -173,11 +173,14 @@ def load_cell_database(vendor, tech):
                         lnbts = str(row.get('LNBTS', '')).strip()
                         lncel = str(row.get('LNCEL', '')).strip()
                         if c_name and mrbts and lncel:
-                            # Construct distName: PLMN-PLMN/MRBTS-XXXXXX/LNBTS-XXXXXX/LNCEL-XX
+                            # LNCEL-level distName: PLMN-PLMN/MRBTS-XXXXXX/LNBTS-XXXXXX/LNCEL-XX
                             dist = f"PLMN-PLMN/{mrbts}/{lnbts}/{lncel}"
+                            # LNBTS-level distName (site level): PLMN-PLMN/MRBTS-XXXXXX/LNBTS-XXXXXX
+                            lnbts_dist = f"PLMN-PLMN/{mrbts}/{lnbts}"
                             site = extract_site_name(c_name, '4G')
                             mapping[c_name] = {
                                 'distName': dist,
+                                'lnbtsDistName': lnbts_dist,
                                 'siteName': site,
                                 'cellName': c_name,
                                 'tech': '4G',
@@ -298,6 +301,39 @@ def load_dump_file(filepath):
     except Exception as e:
         st.error(f"Lỗi khi đọc file dump {os.path.basename(filepath)}: {e}")
         return pd.DataFrame()
+
+
+def detect_mo_class_from_dump(filepath):
+    """Detects what MO class (e.g. LNBTS, LNCEL, LNHOW) the dump file represents
+    by reading the first data row's MO/distName column."""
+    try:
+        df = load_dump_file(filepath)
+        if df.empty:
+            return None
+        mo_col = 'MO' if 'MO' in df.columns else ('distName' if 'distName' in df.columns else None)
+        if mo_col is None:
+            return None
+        sample = str(df[mo_col].dropna().iloc[0]) if not df[mo_col].dropna().empty else ''
+        # Extract the last segment class name, e.g. LNBTS-470016 -> LNBTS
+        parts = sample.split('/')
+        if parts:
+            last_part = parts[-1]  # e.g. 'LNBTS-470016' or 'LNHOW-1'
+            mo_class = last_part.split('-')[0]  # e.g. 'LNBTS'
+            return mo_class
+    except Exception:
+        pass
+    return None
+
+
+def get_query_dist_name(cell_info, mo_class):
+    """Returns the appropriate distName for querying the dump given the MO class of the dump file.
+    
+    - LNBTS class  → use lnbtsDistName (site-level prefix)
+    - LNCEL / LNHOW / others → use full cell distName (startswith filter)
+    """
+    if mo_class == 'LNBTS':
+        return cell_info.get('lnbtsDistName', cell_info['distName'].rsplit('/', 1)[0])
+    return cell_info['distName']
 
 def query_nokia_parameter_value(tech, sheet_name, cell_dist_name, param_name, key_cols_values):
     """Queries the parameter value from Nokia raw export dump files."""
@@ -641,28 +677,52 @@ with col_right:
                         if max_r >= 3:
                             sheet.delete_rows(3, max_r - 2)
                             
+                        # --- Pre-detect dump file and MO class for Nokia (once per sheet) ---
+                        sheet_dump_file = None
+                        sheet_mo_class = None
+                        if vendor == 'Nokia':
+                            _tech_folder = '3G' if tech == '3G' else ('4G' if tech == '4G' else '5G')
+                            _sub_dir = 'DUMP' if tech == '3G' else 'Dump'
+                            _dump_path = os.path.join(DATABASE_DIR, _tech_folder, _sub_dir, 'NSN')
+                            _pattern = os.path.join(_dump_path, f"Export_{sheetname}__*.txt")
+                            _files = glob.glob(_pattern)
+                            if not _files and os.path.exists(_dump_path):
+                                _all = os.listdir(_dump_path)
+                                _files = [os.path.join(_dump_path, f) for f in _all
+                                          if f.lower().startswith(f"export_{sheetname.lower()}__")]
+                            if _files:
+                                sheet_dump_file = max(_files, key=os.path.getmtime)
+                                sheet_mo_class = detect_mo_class_from_dump(sheet_dump_file)
+                        
+                        # Track LNBTS-level sites already processed to avoid duplicate rows
+                        processed_lnbts = set()
+                        
                         row_count = 0
                         for cell in target_cells:
                             instances = []
                             
                             if vendor == 'Nokia':
-                                tech_folder = '3G' if tech == '3G' else ('4G' if tech == '4G' else '5G')
-                                sub_dir = 'DUMP' if tech == '3G' else 'Dump'
-                                dump_path = os.path.join(DATABASE_DIR, tech_folder, sub_dir, 'NSN')
-                                
-                                pattern = os.path.join(dump_path, f"Export_{sheetname}__*.txt")
-                                files = glob.glob(pattern)
-                                if not files:
-                                    all_files = os.listdir(dump_path) if os.path.exists(dump_path) else []
-                                    files = [os.path.join(dump_path, f) for f in all_files if f.lower().startswith(f"export_{sheetname.lower()}__")]
+                                if sheet_dump_file:
+                                    mo_class = sheet_mo_class
                                     
-                                if files:
-                                    latest_f = max(files, key=os.path.getmtime)
-                                    df_dump = load_dump_file(latest_f)
+                                    # Skip duplicate LNBTS entries when processing by-site
+                                    if mo_class == 'LNBTS':
+                                        query_dn = get_query_dist_name(cell, mo_class)
+                                        if query_dn in processed_lnbts:
+                                            continue  # already handled this LNBTS for a previous cell in same site
+                                        processed_lnbts.add(query_dn)
+                                    else:
+                                        query_dn = get_query_dist_name(cell, mo_class)
+                                    
+                                    df_dump = load_dump_file(sheet_dump_file)
                                     if not df_dump.empty:
                                         if 'MO' in df_dump.columns:
                                             df_dump = df_dump.rename(columns={'MO': 'distName'})
-                                        df_filtered = df_dump[df_dump['distName'].astype(str).str.startswith(cell['distName'])]
+                                        # For LNBTS: match exactly; for LNCEL/sub-objects: startswith
+                                        if mo_class == 'LNBTS':
+                                            df_filtered = df_dump[df_dump['distName'].astype(str) == query_dn]
+                                        else:
+                                            df_filtered = df_dump[df_dump['distName'].astype(str).str.startswith(query_dn)]
                                         for _, d_row in df_filtered.iterrows():
                                             instances.append(dict(d_row))
                                             
@@ -693,10 +753,16 @@ with col_right:
                                             instances.append(dict(d_row))
                                             
                             if not instances:
-                                dummy = {'distName': cell['distName'], 'DN': cell['distName'], 'cellName': cell['cellName'], 'CellName': cell['cellName']}
+                                # Build fallback dummy - use lnbtsDistName if sheet is LNBTS level
+                                eff_dist = (cell.get('lnbtsDistName', cell['distName'])
+                                            if sheet_mo_class == 'LNBTS'
+                                            else cell['distName'])
+                                dummy = {'distName': eff_dist, 'DN': eff_dist,
+                                         'cellName': cell['cellName'], 'CellName': cell['cellName'],
+                                         'name': cell.get('siteName', '')}
                                 for p_name in params:
                                     if vendor == 'Nokia':
-                                        val = query_nokia_parameter_value(tech, sheetname, cell['distName'], p_name, {})
+                                        val = query_nokia_parameter_value(tech, sheetname, eff_dist, p_name, {})
                                     else:
                                         val = query_ericsson_parameter_value(tech, sheetname, cell['cellName'], cell['distName'], p_name, {})
                                     dummy[p_name] = val
