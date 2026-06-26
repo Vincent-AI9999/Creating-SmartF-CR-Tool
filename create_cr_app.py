@@ -512,7 +512,10 @@ with col_left:
         )
         if site_input:
             input_sites = [s.strip() for s in re.split(r'[\n,]+', site_input) if s.strip()]
+            st.session_state['input_sites'] = input_sites
             selected_cell_names = []
+        else:
+            st.session_state['input_sites'] = []
             
     # CR mẫu template selection
     st.markdown("<div class='section-header'>2. Chọn CR mẫu (Template)</div>", unsafe_allow_html=True)
@@ -555,10 +558,15 @@ with col_right:
     
     target_cells = []
     
-    if input_method == "Nhập danh sách Trạm thủ công" and 'input_sites' in locals() and input_sites:
-        for c_name, info in cell_db.items():
-            if info['siteName'] in input_sites:
-                target_cells.append(info)
+    if input_method == "Nhập danh sách Trạm thủ công":
+        input_sites = st.session_state.get('input_sites', [])
+        if input_sites:
+            for c_name, info in cell_db.items():
+                if info['siteName'] in input_sites:
+                    target_cells.append(info)
+            if not target_cells:
+                st.warning("⚠️ Không tìm thấy trạm nào khớp trong Database. Kiểm tra lại mã trạm.")
+                st.info("💡 Gợi ý: Mã trạm thường là phần đầu của tên cell, ví dụ cell **DNIDXO09CM4CA** → mã trạm **DNIDXO09**")
     else:
         for c_name in selected_cell_names:
             if c_name in cell_db:
