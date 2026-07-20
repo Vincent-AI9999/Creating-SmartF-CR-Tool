@@ -932,8 +932,9 @@ with col_right:
             """
             wb = openpyxl.load_workbook(template_path)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            safe_netact = group_netact.replace('/', '_').replace('\\', '_').replace(':', '_')
-            out_filename = f"CR_{vendor}_{tech}_{safe_netact}_{timestamp}.xlsx"
+            template_basename = os.path.splitext(os.path.basename(template_path))[0]
+            out_filename = f"{template_basename}_{timestamp}.xlsx"
+
 
 
             # 1. Trạm ảnh hưởng
