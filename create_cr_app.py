@@ -932,7 +932,9 @@ with col_right:
             """
             wb = openpyxl.load_workbook(template_path)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            out_filename = f"CR_{vendor}_{tech}_{group_netact}_{timestamp}.xlsx"
+            safe_netact = group_netact.replace('/', '_').replace('\\', '_').replace(':', '_')
+            out_filename = f"CR_{vendor}_{tech}_{safe_netact}_{timestamp}.xlsx"
+
 
             # 1. Trạm ảnh hưởng
             if 'Trạm ảnh hưởng' in wb.sheetnames:
