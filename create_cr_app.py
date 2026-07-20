@@ -374,6 +374,34 @@ def load_cell_database(vendor, tech, _dump_mtime=0):
                                         mapping[cid] = entry
                         except Exception as _e:
                             pass  # dump CSV read failed, use xlsx data only
+                            
+                    # Also scan vsDataUtranCell.csv for full cell names (e.g. LDGXHG00BM3GA)
+                    dump_3g_utran = os.path.join(DATABASE_DIR, '3G', 'DUMP', 'ERA', 'vsDataUtranCell.csv')
+                    if os.path.exists(dump_3g_utran):
+                        try:
+                            df_utran = pd.read_csv(dump_3g_utran, low_memory=False,
+                                                   usecols=['MeContext_id', 'vsDataUtranCell_id'])
+                            for _, urow in df_utran.iterrows():
+                                cid = str(urow.get('vsDataUtranCell_id', '')).strip()
+                                me_ctx = str(urow.get('MeContext_id', '')).strip()
+                                if cid and cid != 'nan':
+                                    # Fallback siteName to first 8 chars if it's a long cell name, else MeContext
+                                    site = cid[:8] if len(cid) >= 8 else me_ctx
+                                    dist = f"SubNetwork=MobiFone_DongNai,MeContext={me_ctx},ManagedElement=1,RncFunction=1,UtranCell={cid}"
+                                    entry = {
+                                        'distName': dist,
+                                        'siteName': site,
+                                        'cellName': cid,
+                                        'meId': me_ctx,
+                                        'tech': '3G',
+                                        'vendor': 'Ericsson',
+                                        'netact': 'N/A',
+                                    }
+                                    if cid not in mapping:
+                                        mapping[cid] = entry
+                        except Exception as _e:
+                            pass
+
                 # Ericsson 4G mapping
                 elif vendor == 'Ericsson' and tech == '4G':
                     # CellName = full name (DNINTR22CM4E7), ManagedElement_id = site node
@@ -1022,7 +1050,7 @@ with col_right:
                         
                         # ERA cell ID columns per technology
                         cell_id_cols_era = (
-                            ['vsDataNodeBLocalCell_id', 'vsDataNodeBSectorCarrier_id']
+                            ['vsDataNodeBLocalCell_id', 'vsDataNodeBSectorCarrier_id', 'vsDataUtranCell_id', 'UtranCellId']
                             if tech == '3G' else
                             ['vsDataEUtranCellFDD_id', 'eUtranCellFDDId', 'CellName']
                         )
@@ -1038,10 +1066,17 @@ with col_right:
                             latest_f = max(csv_files, key=os.path.getmtime)
                             df_dump = load_dump_file(latest_f, _mtime=os.path.getmtime(latest_f))
                             if not df_dump.empty:
-                                # Step 1: filter by ManagedElement_id (site)
+                                # Step 1: filter by site (MeContext_id or ManagedElement_id)
                                 df_era = df_dump.copy()
-                                if 'ManagedElement_id' in df_era.columns:
-                                    df_era = df_era[df_era['ManagedElement_id'].astype(str) == me_id_era]
+                                if 'MeContext_id' in df_era.columns:
+                                    # For UtranCell, me_id is usually MeContext_id (e.g. RSG091E)
+                                    df_site = df_era[df_era['MeContext_id'].astype(str) == me_id_era]
+                                    if not df_site.empty:
+                                        df_era = df_site
+                                elif 'ManagedElement_id' in df_era.columns:
+                                    df_site = df_era[df_era['ManagedElement_id'].astype(str) == me_id_era]
+                                    if not df_site.empty:
+                                        df_era = df_site
                                 # Step 2: filter by cell ID column
                                 for cid_col in cell_id_cols_era:
                                     if cid_col in df_era.columns:
