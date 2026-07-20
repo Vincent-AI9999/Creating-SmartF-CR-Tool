@@ -788,6 +788,11 @@ with col_right:
 
     with st.spinner("Đang kết nối cơ sở dữ liệu trạm..."):
         cell_db = load_cell_database(vendor, tech, _dump_mtime=_current_mtime)
+        # Load the OTHER vendor's DB too, so cell lookup works regardless of vendor
+        other_vendor = 'Nokia' if vendor == 'Ericsson' else 'Ericsson'
+        cell_db_other = load_cell_database(other_vendor, tech, _dump_mtime=_current_mtime)
+        # Merged DB: primary vendor takes priority, fallback to other vendor
+        cell_db_all = {**cell_db_other, **cell_db}
 
     target_cells = []
 
@@ -830,11 +835,29 @@ with col_right:
                     else:
                         st.info("💡 Gợi ý Nokia: Mã trạm thường là phần đầu của tên cell, ví dụ cell **DNIDXO09CM4CA** → mã trạm **DNIDXO09**")
     else:
+        # "Nhập danh sách Cell thủ công"
+        # Search in ALL vendor databases (cell names are vendor-agnostic)
+        not_found = []
         for c_name in selected_cell_names:
-            if c_name in cell_db:
-                target_cells.append(cell_db[c_name])
+            if c_name in cell_db_all:
+                target_cells.append(cell_db_all[c_name])
             else:
-                st.warning(f"Cell **{c_name}** không tìm thấy trong Database. Sẽ bỏ qua hoặc điền trống.")
+                # Case-insensitive fallback
+                c_lower = c_name.lower()
+                found = next((info for k, info in cell_db_all.items()
+                              if k.lower() == c_lower), None)
+                if found:
+                    target_cells.append(found)
+                else:
+                    not_found.append(c_name)
+        if not_found:
+            st.warning(f"⚠️ Không tìm thấy trong Database: **{', '.join(not_found)}**. Sẽ điền trống.")
+            st.info(
+                f"💡 Gợi ý: Kiểm tra lại tên cell.\n"
+                f"Nokia 3G/4G: ví dụ **LDGXHG28CM3EA**, **DNIDXO09CM4CA**\n"
+                f"Ericsson 3G: ví dụ **DNINTR22UL/S1C3** hoặc chỉ **S1C3** (sẽ khợp trạm đầu tiên có cell đó)\n"
+                f"Ericsson 4G: ví dụ **DNINTR22CM4E7**"
+            )
 
     if target_cells:
         # ── Phân nhóm theo Netact ────────────────────────────────────────
@@ -965,8 +988,10 @@ with col_right:
 
                 for cell in group_cells:
                     instances = []
+                    # Use vendor from cell's DB entry (may differ from UI selector when mixed)
+                    cell_vendor = cell.get('vendor', vendor)
 
-                    if vendor == 'Nokia' and dump_file:
+                    if cell_vendor == 'Nokia' and dump_file:
                         mo_class = sheet_mo_class
                         if mo_class == 'LNBTS':
                             query_dn = get_query_dist_name(cell, mo_class)
@@ -990,7 +1015,7 @@ with col_right:
                                 for _, d_row in df_filtered.iterrows():
                                     instances.append(dict(d_row))
 
-                    elif vendor == 'Ericsson':
+                    elif cell_vendor == 'Ericsson':
                         tech_folder_era = '3G' if tech == '3G' else tech
                         sub_dir_era = 'DUMP' if tech == '3G' else 'Dump'
                         dump_path_era = os.path.join(DATABASE_DIR, tech_folder_era, sub_dir_era, 'ERA')
