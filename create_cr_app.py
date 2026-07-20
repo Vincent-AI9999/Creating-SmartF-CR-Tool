@@ -330,21 +330,50 @@ def load_cell_database(vendor, tech, _dump_mtime=0):
                     for _, row in df.iterrows():
                         c_name = str(row.get('CellName', '')).strip()
                         me_id = str(row.get('ManagedElement_id', '')).strip()
-                        if c_name and me_id:
+                        if c_name and me_id and c_name != 'nan' and me_id != 'nan':
                             dist = f"SubNetwork=MobiFone_DongNai,MeContext={me_id},ManagedElement={me_id},UtranNetwork=1,UtranCell={c_name}"
                             entry = {
                                 'distName': dist,
-                                'siteName': me_id,          # ManagedElement_id is the site
+                                'siteName': me_id,
                                 'cellName': c_name,
                                 'meId': me_id,
                                 'tech': '3G',
                                 'vendor': 'Ericsson',
                                 'netact': 'N/A',
                             }
-                            # Key by cellName (short)
                             mapping[c_name] = entry
-                            # Also key by "ME_ID/CellName" composite for unambiguous lookup
                             mapping[f"{me_id}/{c_name}"] = entry
+                    
+                    # Also scan dump CSV for more complete data
+                    dump_3g_era = os.path.join(DATABASE_DIR, '3G', 'DUMP', 'ERA', 'vsDataNodeBLocalCell.csv')
+                    if os.path.exists(dump_3g_era):
+                        try:
+                            df_dump = pd.read_csv(dump_3g_era, low_memory=False,
+                                                  usecols=['MeContext_id', 'ManagedElement_id',
+                                                           'vsDataNodeBLocalCell_id'])
+                            for _, drow in df_dump.iterrows():
+                                me = str(drow.get('ManagedElement_id', '')).strip()
+                                me_ctx = str(drow.get('MeContext_id', me)).strip()
+                                cid = str(drow.get('vsDataNodeBLocalCell_id', '')).strip()
+                                if me and cid and me != 'nan' and cid != 'nan':
+                                    dist = f"SubNetwork=MobiFone_DongNai,MeContext={me},ManagedElement={me},UtranNetwork=1,UtranCell={cid}"
+                                    entry = {
+                                        'distName': dist,
+                                        'siteName': me,
+                                        'cellName': cid,
+                                        'meId': me,
+                                        'tech': '3G',
+                                        'vendor': 'Ericsson',
+                                        'netact': 'N/A',
+                                    }
+                                    comp_key = f"{me}/{cid}"
+                                    mapping[comp_key] = entry
+                                    # Don't overwrite xlsx-sourced entries by short key
+                                    # unless not already present
+                                    if cid not in mapping:
+                                        mapping[cid] = entry
+                        except Exception as _e:
+                            pass  # dump CSV read failed, use xlsx data only
                 # Ericsson 4G mapping
                 elif vendor == 'Ericsson' and tech == '4G':
                     # CellName = full name (DNINTR22CM4E7), ManagedElement_id = site node
@@ -765,15 +794,39 @@ with col_right:
     if input_method == "Nhập danh sách Trạm thủ công":
         input_sites = st.session_state.get('input_sites', [])
         if input_sites:
+            # Build a set of siteName for fast exact lookup
+            site_set = set(input_sites)
+            
+            # Ericsson ERA: siteName = ManagedElement_id (e.g. LDGBL503, DNINTR22UL)
+            # Support prefix matching: user may enter 'LDGBL503' while DB has 'LDGBL503'
+            # or user enters 'DNINTR22' while DB has 'DNINTR22UL'
+            def site_matches(site_name, input_set):
+                if site_name in input_set:
+                    return True
+                # Check if any input is a prefix of siteName
+                for s in input_set:
+                    if site_name.startswith(s) or s.startswith(site_name):
+                        return True
+                return False
+            
+            seen_keys = set()
             for c_name, info in cell_db.items():
-                if info['siteName'] in input_sites:
+                sn = info.get('siteName', '')
+                # Deduplicate by composite key (siteName/cellName)
+                unique_key = f"{sn}/{info.get('cellName', c_name)}"
+                if unique_key in seen_keys:
+                    continue
+                if site_matches(sn, site_set):
                     target_cells.append(info)
+                    seen_keys.add(unique_key)
             if not target_cells:
                     st.warning("⚠️ Không tìm thấy trạm nào khớp trong Database. Kiểm tra lại mã trạm.")
-                    if vendor == 'Ericsson' and tech == '3G':
-                        st.info("💡 Gợi ý ERA 3G: Nhập **ManagedElement_id** của trạm, ví dụ **DNINTR22UL**")
-                    elif vendor == 'Ericsson' and tech == '4G':
-                        st.info("💡 Gợi ý ERA 4G: Nhập **ManagedElement_id** của trạm, ví dụ **DNINTR22UL**")
+                    if vendor == 'Ericsson':
+                        st.info(
+                            f"💡 Gợi ý ERA {tech}: Nhập **MeContext_id** của trạm, ví dụ **LDGBL503** hoặc **DNINTR22UL**.  \n"
+                            f"Database ERA 3G hiện có {len(set(info['siteName'] for info in cell_db.values() if info.get('tech')=='3G'))} trạm. "
+                            f"Một số mã: {', '.join(sorted(set(info['siteName'] for info in cell_db.values() if info.get('tech')=='3G'))[:5])}..."
+                        )
                     else:
                         st.info("💡 Gợi ý Nokia: Mã trạm thường là phần đầu của tên cell, ví dụ cell **DNIDXO09CM4CA** → mã trạm **DNIDXO09**")
     else:
