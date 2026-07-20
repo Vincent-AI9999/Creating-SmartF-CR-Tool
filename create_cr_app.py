@@ -1044,8 +1044,9 @@ with col_right:
                                     instances.append(dict(d_row))
 
                     elif cell_vendor == 'Ericsson':
-                        tech_folder_era = '3G' if tech == '3G' else tech
-                        sub_dir_era = 'DUMP' if tech == '3G' else 'Dump'
+                        # ERA dump CSV folder: 3G/DUMP/ERA  or  4G/Dump/ERA
+                        tech_folder_era = '3G' if cell.get('tech', tech) == '3G' else cell.get('tech', tech)
+                        sub_dir_era = 'DUMP' if tech_folder_era == '3G' else 'Dump'
                         dump_path_era = os.path.join(DATABASE_DIR, tech_folder_era, sub_dir_era, 'ERA')
                         
                         # ERA cell ID columns per technology
@@ -1058,10 +1059,21 @@ with col_right:
                         
                         csv_files = []
                         if os.path.exists(dump_path_era):
-                            for name in [sheetname, f"vsData{sheetname}"]:
-                                csv_files.extend(glob.glob(os.path.join(dump_path_era, f"{name}.csv")))
-                                csv_files.extend(glob.glob(os.path.join(dump_path_era, f"{name.lower()}.csv")))
-                        
+                            # sheetname e.g. 'UtranCell_primaryCpichPower' -> MO class 'UtranCell'
+                            # Try: exact, with vsData prefix, stripped MO class, stripped with vsData
+                            mo_class_name = sheetname.split('_')[0] if '_' in sheetname else sheetname
+                            candidate_names = [
+                                sheetname,
+                                f"vsData{sheetname}",
+                                mo_class_name,
+                                f"vsData{mo_class_name}",
+                            ]
+                            for cand in candidate_names:
+                                for ext in [cand, cand.lower()]:
+                                    p = os.path.join(dump_path_era, f"{ext}.csv")
+                                    if os.path.exists(p) and p not in csv_files:
+                                        csv_files.append(p)
+
                         if csv_files:
                             latest_f = max(csv_files, key=os.path.getmtime)
                             df_dump = load_dump_file(latest_f, _mtime=os.path.getmtime(latest_f))
@@ -1178,10 +1190,8 @@ with col_right:
                 template_path = os.path.join(TEMPLATE_DIR, selected_template)
                 generated_files = {}
 
-                with st.spinner(f"Đang tạo CR cho {len(netact_names_found)} Netact..."):
+                with st.spinner(f"Đang tạo CR cho {len(netact_names_found)} nhóm..."):
                     for nname in netact_names_found:
-                        if nname == 'N/A':
-                            continue
                         group = groups[nname]
                         try:
                             data_bytes, fname, sheet_log = generate_cr_for_group(
