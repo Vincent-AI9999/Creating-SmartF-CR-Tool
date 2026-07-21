@@ -269,177 +269,157 @@ def load_cell_database(vendor, tech, _dump_mtime=0):
     Tham số _dump_mtime dùng làm cache key để tự reload khi dump/database thay đổi.
     """
     mapping = {}
-    # Build netact map for Nokia (4G/5G only)
     netact_map = {}
     if vendor == 'Nokia' and tech in ('4G', '5G'):
         netact_map = build_cell_to_netact_map(tech, _dump_mtime)
     try:
-        # Load from consolidated database files
         filename = f"{tech}_{'NSN' if vendor == 'Nokia' else 'ERA'}.xlsx"
         db_path = os.path.join(DATABASE_DIR, filename)
-        
+
         if os.path.exists(db_path):
             wb = openpyxl.load_workbook(db_path, read_only=True)
             if 'usual_report' in wb.sheetnames:
                 df = pd.read_excel(db_path, sheet_name='usual_report')
                 df.columns = [str(c).strip() for c in df.columns]
-                
-                # Nokia 4G mapping
+
+                # ── Nokia 4G (vectorized) ───────────────────────────────
                 if vendor == 'Nokia' and tech == '4G':
-                    # Has MRBTS, LNCEL, cellName, LNBTS
-                    for _, row in df.iterrows():
-                        c_name = str(row.get('cellName', '')).strip()
-                        mrbts = str(row.get('MRBTS', '')).strip()
-                        lnbts = str(row.get('LNBTS', '')).strip()
-                        lncel = str(row.get('LNCEL', '')).strip()
-                        if c_name and mrbts and lncel:
-                            # LNCEL-level distName: PLMN-PLMN/MRBTS-XXXXXX/LNBTS-XXXXXX/LNCEL-XX
-                            dist = f"PLMN-PLMN/{mrbts}/{lnbts}/{lncel}"
-                            # LNBTS-level distName (site level): PLMN-PLMN/MRBTS-XXXXXX/LNBTS-XXXXXX
+                    need = ['cellName', 'MRBTS', 'LNBTS', 'LNCEL']
+                    avail = [c for c in need if c in df.columns]
+                    if len(avail) == 4:
+                        sub = df[avail].dropna(subset=['cellName', 'MRBTS', 'LNCEL'])
+                        sub = sub[sub['cellName'].astype(str).str.strip() != '']
+                        for row in sub.itertuples(index=False):
+                            c_name = str(row.cellName).strip()
+                            mrbts  = str(row.MRBTS).strip()
+                            lnbts  = str(row.LNBTS).strip()
+                            lncel  = str(row.LNCEL).strip()
+                            if not c_name or not mrbts or not lncel:
+                                continue
+                            dist       = f"PLMN-PLMN/{mrbts}/{lnbts}/{lncel}"
                             lnbts_dist = f"PLMN-PLMN/{mrbts}/{lnbts}"
                             site = extract_site_name(c_name, '4G')
                             mapping[c_name] = {
-                                'distName': dist,
-                                'lnbtsDistName': lnbts_dist,
-                                'siteName': site,
-                                'cellName': c_name,
-                                'tech': '4G',
-                                'vendor': 'Nokia',
+                                'distName': dist, 'lnbtsDistName': lnbts_dist,
+                                'siteName': site, 'cellName': c_name,
+                                'tech': '4G', 'vendor': 'Nokia',
                                 'netact': netact_map.get(c_name, NETACT_PRIORITY[0]),
                             }
-                # Nokia 3G mapping
+
+                # ── Nokia 3G (vectorized) ───────────────────────────────
                 elif vendor == 'Nokia' and tech == '3G':
-                    # Has distName, cellName
-                    for _, row in df.iterrows():
-                        c_name = str(row.get('cellName', '')).strip()
-                        dist = str(row.get('distName', '')).strip()
-                        if c_name and dist:
-                            site = extract_site_name(c_name, '3G')
-                            mapping[c_name] = {
-                                'distName': dist,
-                                'siteName': site,
-                                'cellName': c_name,
-                                'tech': '3G',
-                                'vendor': 'Nokia',
-                                'netact': NETACT_PRIORITY[0],  # 3G dùng Netactnh1
-                            }
-                # Ericsson 3G mapping
+                    need = ['cellName', 'distName']
+                    if all(c in df.columns for c in need):
+                        sub = df[need].dropna().copy()
+                        sub = sub[sub['cellName'].astype(str).str.strip() != '']
+                        for row in sub.itertuples(index=False):
+                            c_name = str(row.cellName).strip()
+                            dist   = str(row.distName).strip()
+                            if c_name and dist:
+                                mapping[c_name] = {
+                                    'distName': dist,
+                                    'siteName': extract_site_name(c_name, '3G'),
+                                    'cellName': c_name, 'tech': '3G', 'vendor': 'Nokia',
+                                    'netact': NETACT_PRIORITY[0],
+                                }
+
+                # ── Ericsson 3G (vectorized + dump CSVs) ───────────────
                 elif vendor == 'Ericsson' and tech == '3G':
-                    # CellName = short ID (S1C3), ManagedElement_id = site node (DNINTR22UL)
-                    # Map both by CellName and by composite key me_id+cellName
-                    for _, row in df.iterrows():
-                        c_name = str(row.get('CellName', '')).strip()
-                        me_id = str(row.get('ManagedElement_id', '')).strip()
-                        if c_name and me_id and c_name != 'nan' and me_id != 'nan':
-                            dist = f"SubNetwork=MobiFone_DongNai,MeContext={me_id},ManagedElement={me_id},UtranNetwork=1,UtranCell={c_name}"
-                            entry = {
-                                'distName': dist,
-                                'siteName': me_id,
-                                'cellName': c_name,
-                                'meId': me_id,
-                                'tech': '3G',
-                                'vendor': 'Ericsson',
-                                'netact': 'N/A',
-                            }
+                    need = ['CellName', 'ManagedElement_id']
+                    if all(c in df.columns for c in need):
+                        sub = df[need].dropna().copy()
+                        sub = sub[
+                            (sub['CellName'].astype(str).str.strip() != '') &
+                            (sub['CellName'].astype(str) != 'nan') &
+                            (sub['ManagedElement_id'].astype(str) != 'nan')
+                        ]
+                        for row in sub.itertuples(index=False):
+                            c_name = str(row.CellName).strip()
+                            me_id  = str(row.ManagedElement_id).strip()
+                            dist   = (f"SubNetwork=MobiFone_DongNai,MeContext={me_id},"
+                                      f"ManagedElement={me_id},UtranNetwork=1,UtranCell={c_name}")
+                            entry  = {'distName': dist, 'siteName': me_id, 'cellName': c_name,
+                                      'meId': me_id, 'tech': '3G', 'vendor': 'Ericsson', 'netact': 'N/A'}
                             mapping[c_name] = entry
                             mapping[f"{me_id}/{c_name}"] = entry
-                    
-                    # Also scan dump CSV for more complete data
+
+                    # vsDataNodeBLocalCell.csv (short cell IDs like S1C1)
                     dump_3g_era = os.path.join(DATABASE_DIR, '3G', 'DUMP', 'ERA', 'vsDataNodeBLocalCell.csv')
                     if os.path.exists(dump_3g_era):
                         try:
                             df_dump = pd.read_csv(dump_3g_era, low_memory=False,
                                                   usecols=['MeContext_id', 'ManagedElement_id',
                                                            'vsDataNodeBLocalCell_id'])
-                            for _, drow in df_dump.iterrows():
-                                me = str(drow.get('ManagedElement_id', '')).strip()
-                                me_ctx = str(drow.get('MeContext_id', me)).strip()
-                                cid = str(drow.get('vsDataNodeBLocalCell_id', '')).strip()
+                            df_dump = df_dump.dropna(subset=['ManagedElement_id', 'vsDataNodeBLocalCell_id'])
+                            df_dump = df_dump[df_dump['ManagedElement_id'].astype(str) != 'nan']
+                            for row in df_dump.itertuples(index=False):
+                                me  = str(row.ManagedElement_id).strip()
+                                cid = str(row.vsDataNodeBLocalCell_id).strip()
                                 if me and cid and me != 'nan' and cid != 'nan':
-                                    dist = f"SubNetwork=MobiFone_DongNai,MeContext={me},ManagedElement={me},UtranNetwork=1,UtranCell={cid}"
-                                    entry = {
-                                        'distName': dist,
-                                        'siteName': me,
-                                        'cellName': cid,
-                                        'meId': me,
-                                        'tech': '3G',
-                                        'vendor': 'Ericsson',
-                                        'netact': 'N/A',
-                                    }
-                                    comp_key = f"{me}/{cid}"
-                                    mapping[comp_key] = entry
-                                    # Don't overwrite xlsx-sourced entries by short key
-                                    # unless not already present
-                                    if cid not in mapping:
-                                        mapping[cid] = entry
-                        except Exception as _e:
-                            pass  # dump CSV read failed, use xlsx data only
-                            
-                    # Also scan vsDataUtranCell.csv for full cell names (e.g. LDGXHG00BM3GA)
+                                    dist  = (f"SubNetwork=MobiFone_DongNai,MeContext={me},"
+                                             f"ManagedElement={me},UtranNetwork=1,UtranCell={cid}")
+                                    entry = {'distName': dist, 'siteName': me, 'cellName': cid,
+                                             'meId': me, 'tech': '3G', 'vendor': 'Ericsson', 'netact': 'N/A'}
+                                    mapping.setdefault(f"{me}/{cid}", entry)
+                                    mapping.setdefault(cid, entry)
+                        except Exception:
+                            pass
+
+                    # vsDataUtranCell.csv (full cell names like LDGXHG00BM3GA)
                     dump_3g_utran = os.path.join(DATABASE_DIR, '3G', 'DUMP', 'ERA', 'vsDataUtranCell.csv')
                     if os.path.exists(dump_3g_utran):
                         try:
                             df_utran = pd.read_csv(dump_3g_utran, low_memory=False,
                                                    usecols=['MeContext_id', 'vsDataUtranCell_id'])
-                            for _, urow in df_utran.iterrows():
-                                cid = str(urow.get('vsDataUtranCell_id', '')).strip()
-                                me_ctx = str(urow.get('MeContext_id', '')).strip()
-                                if cid and cid != 'nan':
-                                    # Fallback siteName to first 8 chars if it's a long cell name, else MeContext
-                                    site = cid[:8] if len(cid) >= 8 else me_ctx
-                                    dist = f"SubNetwork=MobiFone_DongNai,MeContext={me_ctx},ManagedElement=1,RncFunction=1,UtranCell={cid}"
-                                    entry = {
-                                        'distName': dist,
-                                        'siteName': site,
-                                        'cellName': cid,
-                                        'meId': me_ctx,
-                                        'tech': '3G',
-                                        'vendor': 'Ericsson',
-                                        'netact': 'N/A',
-                                    }
-                                    if cid not in mapping:
-                                        mapping[cid] = entry
-                        except Exception as _e:
+                            df_utran = df_utran.dropna(subset=['vsDataUtranCell_id'])
+                            df_utran = df_utran[df_utran['vsDataUtranCell_id'].astype(str) != 'nan']
+                            for row in df_utran.itertuples(index=False):
+                                cid    = str(row.vsDataUtranCell_id).strip()
+                                me_ctx = str(row.MeContext_id).strip()
+                                if cid and cid != 'nan' and cid not in mapping:
+                                    site  = cid[:8] if len(cid) >= 8 else me_ctx
+                                    dist  = (f"SubNetwork=MobiFone_DongNai,MeContext={me_ctx},"
+                                             f"ManagedElement=1,RncFunction=1,UtranCell={cid}")
+                                    mapping[cid] = {'distName': dist, 'siteName': site,
+                                                    'cellName': cid, 'meId': me_ctx,
+                                                    'tech': '3G', 'vendor': 'Ericsson', 'netact': 'N/A'}
+                        except Exception:
                             pass
 
-                # Ericsson 4G mapping
+                # ── Ericsson 4G (vectorized) ────────────────────────────
                 elif vendor == 'Ericsson' and tech == '4G':
-                    # CellName = full name (DNINTR22CM4E7), ManagedElement_id = site node
-                    for _, row in df.iterrows():
-                        c_name = str(row.get('CellName', '')).strip()
-                        me_id = str(row.get('ManagedElement_id', '')).strip()
-                        if c_name and me_id:
-                            dist = f"SubNetwork=MobiFone_DongNai,MeContext={me_id},ManagedElement={me_id},ENodeBFunction=1,EUtranCellFDD={c_name}"
-                            entry = {
-                                'distName': dist,
-                                'siteName': me_id,
-                                'cellName': c_name,
-                                'meId': me_id,
-                                'tech': '4G',
-                                'vendor': 'Ericsson',
-                                'netact': 'N/A',
-                            }
-                            mapping[c_name] = entry
-                # Ericsson 5G mapping
+                    need = ['CellName', 'ManagedElement_id']
+                    if all(c in df.columns for c in need):
+                        sub = df[need].dropna().copy()
+                        sub = sub[sub['CellName'].astype(str).str.strip() != '']
+                        for row in sub.itertuples(index=False):
+                            c_name = str(row.CellName).strip()
+                            me_id  = str(row.ManagedElement_id).strip()
+                            if c_name and me_id:
+                                dist = (f"SubNetwork=MobiFone_DongNai,MeContext={me_id},"
+                                        f"ManagedElement={me_id},ENodeBFunction=1,EUtranCellFDD={c_name}")
+                                mapping[c_name] = {'distName': dist, 'siteName': me_id,
+                                                   'cellName': c_name, 'meId': me_id,
+                                                   'tech': '4G', 'vendor': 'Ericsson', 'netact': 'N/A'}
+
+                # ── Ericsson 5G (vectorized) ────────────────────────────
                 elif vendor == 'Ericsson' and tech == '5G':
-                    # Has ManagedElement_id, CellName
-                    for _, row in df.iterrows():
-                        c_name = str(row.get('CellName', '')).strip()
-                        me_id = str(row.get('ManagedElement_id', '')).strip()
-                        if c_name and me_id:
-                            dist = f"SubNetwork=MobiFone_DongNai,MeContext={me_id},ManagedElement={me_id},GNBCUCPFunction=1,NRCellCU={c_name}"
-                            mapping[c_name] = {
-                                'distName': dist,
-                                'siteName': me_id,
-                                'cellName': c_name,
-                                'tech': '5G',
-                                'vendor': 'Ericsson',
-                                'netact': 'N/A',
-                            }
-            
-            # Special case for Nokia 5G (where 5G_NSN.xlsx only has hardware_report)
+                    need = ['CellName', 'ManagedElement_id']
+                    if all(c in df.columns for c in need):
+                        sub = df[need].dropna().copy()
+                        sub = sub[sub['CellName'].astype(str).str.strip() != '']
+                        for row in sub.itertuples(index=False):
+                            c_name = str(row.CellName).strip()
+                            me_id  = str(row.ManagedElement_id).strip()
+                            if c_name and me_id:
+                                dist = (f"SubNetwork=MobiFone_DongNai,MeContext={me_id},"
+                                        f"ManagedElement={me_id},GNBCUCPFunction=1,NRCellCU={c_name}")
+                                mapping[c_name] = {'distName': dist, 'siteName': me_id,
+                                                   'cellName': c_name, 'tech': '5G',
+                                                   'vendor': 'Ericsson', 'netact': 'N/A'}
+
+            # ── Nokia 5G special (Master Cell File) ────────────────────
             elif vendor == 'Nokia' and tech == '5G':
-                # We can query Master_Cell_File_*.xlsx sheet '5G Cells'!
                 master_files = glob.glob(os.path.join(DATABASE_DIR, "Master_Cell_File_*.xlsx"))
                 if master_files:
                     latest_master = max(master_files, key=os.path.getmtime)
@@ -447,37 +427,40 @@ def load_cell_database(vendor, tech, _dump_mtime=0):
                     if '5G Cells' in m_wb.sheetnames:
                         df_5g = pd.read_excel(latest_master, sheet_name='5G Cells')
                         df_5g.columns = [str(c).strip() for c in df_5g.columns]
-                        for _, row in df_5g.iterrows():
-                            c_name = str(row.get('Cell Name', '')).strip()
-                            vdr = str(row.get('Vendor', '')).strip()
-                            if c_name and vdr == 'NSN':
-                                cell_id = int(row.get('Cell ID', 0))
-                                site = extract_site_name(c_name, '5G')
-                                # Construct Nokia 5G distName: PLMN-PLMN/MRBTS-XXXX/NRBTS-XXXX/NRCELL-XX
-                                # Let's fetch gNodeB ID from cell info
-                                gnb = str(row.get('gNodeB ID', '')).strip()
-                                # e.g. MRBTS-5856010
-                                if 'MRBTS-' in gnb:
-                                    mrbts = gnb
-                                else:
-                                    mrbts = f"MRBTS-{gnb}"
-                                dist = f"PLMN-PLMN/{mrbts}/NRBTS-{gnb.replace('MRBTS-', '')}/NRCELL-{cell_id}"
-                                mapping[c_name] = {
-                                    'distName': dist,
-                                    'siteName': site,
-                                    'cellName': c_name,
-                                    'tech': '5G',
-                                    'vendor': 'Nokia',
-                                    'netact': netact_map.get(c_name, NETACT_PRIORITY[0]),
-                                }
+                        sub5g = df_5g[df_5g.get('Vendor', pd.Series(dtype=str)).astype(str) == 'NSN']
+                        for row in sub5g.itertuples(index=False):
+                            c_name = str(getattr(row, 'Cell Name', '')).strip()
+                            if not c_name:
+                                continue
+                            cell_id = getattr(row, 'Cell ID', 0)
+                            gnb     = str(getattr(row, 'gNodeB ID', '')).strip()
+                            mrbts   = gnb if 'MRBTS-' in gnb else f"MRBTS-{gnb}"
+                            dist    = f"PLMN-PLMN/{mrbts}/NRBTS-{gnb.replace('MRBTS-', '')}/NRCELL-{cell_id}"
+                            mapping[c_name] = {
+                                'distName': dist, 'siteName': extract_site_name(c_name, '5G'),
+                                'cellName': c_name, 'tech': '5G', 'vendor': 'Nokia',
+                                'netact': netact_map.get(c_name, NETACT_PRIORITY[0]),
+                            }
         else:
-            # Fallback to scanning raw cell exports if consolidated file is missing
             st.warning(f"Không tìm thấy database tổng hợp {filename}. Sẽ quét file raw trong dump...")
-            
+
     except Exception as e:
         st.error(f"Lỗi khi xây dựng bản đồ Cell Database: {e}")
-        
+
     return mapping
+
+
+@st.cache_data(show_spinner=False)
+def load_cell_database_all(tech, _dump_mtime=0):
+    """Load cả Nokia và Ericsson cùng 1 tech trong một lần, cache kết quả gộp.
+    Tránh gọi load_cell_database 2 lần riêng biệt mỗi render.
+    """
+    db_nokia  = load_cell_database('Nokia',    tech, _dump_mtime)
+    db_era    = load_cell_database('Ericsson', tech, _dump_mtime)
+    # Merge: Nokia keys win if both exist (Nokia has lnbtsDistName etc.)
+    merged = {**db_era, **db_nokia}
+    return merged, db_nokia, db_era
+
 
 # Cache dump file - dùng cả filepath lẫn mtime làm key để tự reload khi file thay đổi
 @st.cache_data(show_spinner=False)
@@ -679,11 +662,14 @@ def copy_cell_style(src_cell, dst_cell):
         dst_cell.alignment = copy.copy(src_cell.alignment)
         dst_cell.number_format = src_cell.number_format
 
+import sys
+sys.path.append(r"F:\OneDrive - Mobifone\F_WORKING\Python_Coding\HOSR")
+
 # -----------------------------------------------------------------------------
 # APPLICATION MAIN INTERFACE
 # -----------------------------------------------------------------------------
-st.markdown("<div class='main-title'>MOBIFONE CR AUTOMATION TOOL</div>", unsafe_allow_html=True)
-st.markdown("<div class='subtitle'>Tối ưu hóa quy trình cấu hình tham số mạng vô tuyến Nokia & Ericsson</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-title'>MOBIFONE AUTOMATION TOOL</div>", unsafe_allow_html=True)
+st.markdown("<div class='subtitle'>Tối ưu hóa quy trình cấu hình tham số mạng vô tuyến Nokia & Ericsson | Xuất Cặp Neighbor HO Kém</div>", unsafe_allow_html=True)
 
 # Sidebar - Trạng thái dump và nút làm mới
 with st.sidebar:
@@ -719,8 +705,143 @@ with st.sidebar:
     st.markdown("---")
     st.caption("Mobifone CR Automation Tool v2.0")
 
-# Layout: 2 Columns
-col_left, col_right = st.columns([1, 2])
+# Main Top Tabs
+tab_bad_ho, tab_cr = st.tabs(["📊 Xuất Cặp Neighbor HO Kém (<97%) [Mới]", "🛠️ Tạo Change Request (CR)"])
+
+# -----------------------------------------------------------------------------
+# TAB 1: XUẤT CẶP NEIGHBOR HO KÉM (<97%)
+# -----------------------------------------------------------------------------
+with tab_bad_ho:
+    st.markdown("<div class='section-header'>📊 BÁO CÁO & XUẤT CẶP NEIGHBOR HO KÉM (<97%)</div>", unsafe_allow_html=True)
+    st.info("Hệ thống tự động lọc các cặp Intra HO, Inter HO và IRAT HO có tỷ lệ chuyển giao kém (<97%), tính khoảng cách giữa các cell và tạo sẵn câu lệnh CR Delete chính xác chứa chuỗi `$dn` trích xuất từ file Dump Nokia.")
+
+    col1_ho, col2_ho = st.columns([1, 2])
+    with col1_ho:
+        prov_choice = st.selectbox("Chọn Tỉnh/Thành:", ["Lâm Đồng (LDG)", "Đồng Nai (DNI)", "Tây Ninh (TNI)"], key="t1_prov")
+        prov_code = "LDG" if "LDG" in prov_choice else ("DNI" if "DNI" in prov_choice else "TNI")
+
+        filter_mode = st.radio(
+            "Phạm vi phân tích & lọc:",
+            [
+                "🌐 Tất cả các trạm trong Tỉnh",
+                "📌 Lọc theo Group/Danh sách Cell thủ công",
+                "🏢 Lọc theo Group/Danh sách Mã Trạm thủ công"
+            ],
+            key="t1_filter_mode"
+        )
+        
+        target_cell_set = None
+        target_site_set = None
+        
+        if filter_mode == "📌 Lọc theo Group/Danh sách Cell thủ công":
+            raw_cell_input = st.text_area(
+                "Nhập danh sách Cell (phân cách bằng dấu phẩy, dấu cách hoặc xuống dòng):",
+                value="LDG1BL02DM4CA, LDGBGN00BM4CA",
+                height=100,
+                key="t1_raw_cells"
+            )
+            tokens = re.split(r'[\s,;\n]+', raw_cell_input.strip())
+            target_cell_set = set(t.upper() for t in tokens if t.strip())
+            st.caption(f"Đã nhận diện: **{len(target_cell_set)}** cells")
+            
+        elif filter_mode == "🏢 Lọc theo Group/Danh sách Mã Trạm thủ công":
+            raw_site_input = st.text_area(
+                "Nhập danh sách Mã Trạm (phân cách bằng dấu phẩy, dấu cách hoặc xuống dòng):",
+                value="LDG1BL02, LDGBGN00",
+                height=100,
+                key="t1_raw_sites"
+            )
+            tokens = re.split(r'[\s,;\n]+', raw_site_input.strip())
+            target_site_set = set(t.upper() for t in tokens if t.strip())
+            st.caption(f"Đã nhận diện: **{len(target_site_set)}** mã trạm")
+
+        threshold = st.number_input("Ngưỡng SR (%):", min_value=50.0, max_value=100.0, value=97.0, step=0.5, key="t1_thresh")
+        min_att = st.number_input("Số lượng attempt tối thiểu:", min_value=0, max_value=100, value=0, step=1, key="t1_att")
+
+        st.markdown("---")
+        run_export = st.button("🚀 Bắt đầu xuất Cặp Neighbor Kém", type="primary", use_container_width=True, key="t1_run_btn")
+
+    if run_export:
+        import export_bad_ho_pairs as ho_exp
+        ho_exp.HOSR_THRESHOLD = threshold
+
+        with st.spinner(f"Đang đọc dữ liệu HO KPI & file Dump cho tỉnh {prov_choice}..."):
+            c4g, s4g, s3g, m3g_rnc_cid, m3g_cid, eci_to_name, cache_raw = ho_exp.load_cache()
+            cell_to_enb, lnadjl_map, lnadjw_map = ho_exp.load_dump_maps(cache_raw)
+            cell_kpi, bad_intra, bad_inter, bad_irat = ho_exp.load_cell_kpi(prov_code)
+            ho4g_files, irat_files = ho_exp.find_ho_files(prov_code)
+
+            intra_rows, inter_rows = ho_exp.load_ho4g_pairs(
+                ho4g_files, prov_code, bad_intra, bad_inter, c4g, s4g, eci_to_name, cell_to_enb, lnadjl_map,
+                target_cell_set=target_cell_set, target_site_set=target_site_set
+            )
+            irat_rows = ho_exp.load_irat_pairs(
+                irat_files, prov_code, bad_irat, c4g, s4g, s3g, m3g_rnc_cid, m3g_cid, cell_to_enb, lnadjw_map,
+                target_cell_set=target_cell_set, target_site_set=target_site_set
+            )
+
+            out_file = ho_exp.export_excel(prov_code, intra_rows, inter_rows, irat_rows,
+                                          cell_kpi, bad_intra, bad_inter, bad_irat)
+
+            with open(out_file, "rb") as f:
+                excel_bytes = f.read()
+
+            st.session_state['tab2_ho_result'] = {
+                'file_bytes': excel_bytes,
+                'file_name': os.path.basename(out_file),
+                'intra_count': len(intra_rows),
+                'inter_count': len(inter_rows),
+                'irat_count': len(irat_rows),
+                'intra_df': pd.DataFrame(intra_rows),
+                'inter_df': pd.DataFrame(inter_rows),
+                'irat_df': pd.DataFrame(irat_rows),
+                'prov': prov_code
+            }
+
+    if 'tab2_ho_result' in st.session_state:
+        res = st.session_state['tab2_ho_result']
+        st.success(f"✅ Đã tổng hợp thành công báo cáo cặp Neighbor kém cho tỉnh **{res['prov']}**!")
+        
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Intra HO Kém", f"{res['intra_count']:,} cặp")
+        m2.metric("Inter HO Kém", f"{res['inter_count']:,} cặp")
+        m3.metric("IRAT HO (4G->3G) Kém", f"{res['irat_count']:,} cặp")
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.download_button(
+            label=f"📥 Tải xuống file Excel ({res['file_name']})",
+            data=res['file_bytes'],
+            file_name=res['file_name'],
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+            use_container_width=True,
+            key="tab2_dl_btn"
+        )
+
+        st.markdown("---")
+        t1, t2, t3 = st.tabs(["📌 Intra HO Kém", "🌐 Inter HO Kém", "📱 IRAT HO (4G->3G) Kém"])
+        with t1:
+            if not res['intra_df'].empty:
+                st.dataframe(res['intra_df'], use_container_width=True)
+            else:
+                st.info("Không có cặp Intra HO kém.")
+        with t2:
+            if not res['inter_df'].empty:
+                st.dataframe(res['inter_df'], use_container_width=True)
+            else:
+                st.info("Không có cặp Inter HO kém.")
+        with t3:
+            if not res['irat_df'].empty:
+                st.dataframe(res['irat_df'], use_container_width=True)
+            else:
+                st.info("Không có cặp IRAT HO kém.")
+
+# -----------------------------------------------------------------------------
+# TAB 1: TẠO CHANGE REQUEST (CR)
+# -----------------------------------------------------------------------------
+with tab_cr:
+    # Layout: 2 Columns
+    col_left, col_right = st.columns([1, 2])
 
 
 with col_left:
@@ -815,12 +936,9 @@ with col_right:
     st.markdown("<div class='section-header'>3. Kiểm tra thông tin & Tạo CR</div>", unsafe_allow_html=True)
 
     with st.spinner("Đang kết nối cơ sở dữ liệu trạm..."):
-        cell_db = load_cell_database(vendor, tech, _dump_mtime=_current_mtime)
-        # Load the OTHER vendor's DB too, so cell lookup works regardless of vendor
-        other_vendor = 'Nokia' if vendor == 'Ericsson' else 'Ericsson'
-        cell_db_other = load_cell_database(other_vendor, tech, _dump_mtime=_current_mtime)
-        # Merged DB: primary vendor takes priority, fallback to other vendor
-        cell_db_all = {**cell_db_other, **cell_db}
+        cell_db_all, cell_db_nokia, cell_db_era = load_cell_database_all(tech, _dump_mtime=_current_mtime)
+        # cell_db = vendor-specific DB (for site-level lookup in "Nhập Trạm" mode)
+        cell_db = cell_db_nokia if vendor == 'Nokia' else cell_db_era
 
     target_cells = []
 
