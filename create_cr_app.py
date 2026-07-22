@@ -1311,24 +1311,39 @@ with col_right:
                 template_path = os.path.join(TEMPLATE_DIR, selected_template)
                 generated_files = {}
 
-                with st.spinner(f"Đang tạo CR cho {len(netact_names_found)} nhóm..."):
-                    for nname in netact_names_found:
-                        group = groups[nname]
-                        try:
-                            data_bytes, fname, sheet_log = generate_cr_for_group(
-                                group, nname, template_path, tech, vendor
-                            )
-                            generated_files[nname] = (data_bytes, fname, sheet_log)
-                            # Lưu ra disk
-                            out_path = os.path.join(BASE_WORKSPACE_PATH, fname)
-                            with open(out_path, "wb") as f:
-                                f.write(data_bytes)
-                        except Exception as e:
-                            st.error(f"❌ Lỗi tạo CR cho {nname}: {e}")
-                            st.exception(e)
+                total_groups = len(netact_names_found)
+                # ── Progress UI ────────────────────────────────────────────
+                prog_bar    = st.progress(0, text="⏳ Đang khởi động...")
+                status_box  = st.empty()
+
+                for g_idx, nname in enumerate(netact_names_found):
+                    group = groups[nname]
+                    pct_start = int(g_idx / total_groups * 100)
+                    prog_bar.progress(pct_start,
+                                      text=f"⚙️ [{g_idx+1}/{total_groups}] Đang tạo CR nhóm **{nname}** ({len(group)} cells)...")
+                    status_box.info(f"📂 Nhóm **{nname}** — {len(group)} cells — đang xử lý...")
+                    try:
+                        data_bytes, fname, sheet_log = generate_cr_for_group(
+                            group, nname, template_path, tech, vendor
+                        )
+                        generated_files[nname] = (data_bytes, fname, sheet_log)
+                        # Lưu ra disk
+                        out_path = os.path.join(BASE_WORKSPACE_PATH, fname)
+                        with open(out_path, "wb") as f:
+                            f.write(data_bytes)
+                        pct_done = int((g_idx + 1) / total_groups * 100)
+                        prog_bar.progress(pct_done,
+                                          text=f"✅ [{g_idx+1}/{total_groups}] {nname} — hoàn thành ({pct_done}%)")
+                        status_box.success(f"✅ Nhóm **{nname}** xong — {len(group)} cells, {len(sheet_log)} sheets")
+                    except Exception as e:
+                        st.error(f"❌ Lỗi tạo CR cho {nname}: {e}")
+                        st.exception(e)
+
+                prog_bar.progress(100, text="🎉 Hoàn thành 100%!")
+                status_box.empty()
 
                 if generated_files:
-                    st.success(f"✅ Tạo CR thành công cho {len(generated_files)} Netact!")
+                    st.success(f"✅ Tạo CR thành công cho {len(generated_files)} nhóm!")
                     for nname, (data_bytes, fname, sheet_log) in generated_files.items():
                         color = NETACT_COLORS.get(nname, "#333")
                         st.markdown(
@@ -1346,6 +1361,7 @@ with col_right:
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             key=f"dl_{nname}_{timestamp}"
                         )
+
     else:
         st.info("Vui lòng chọn hoặc nhập Cell/Trạm đầu vào để kiểm tra.")
 
